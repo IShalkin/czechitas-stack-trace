@@ -361,6 +361,95 @@
     z-index: 10;
   }
 
+  /* ───── Event stream (under-the-hood log) ───── */
+  .event-stream {
+    margin-top: 12px;
+    border: 1px solid var(--muted-bg);
+    border-radius: 6px;
+    background: #1a1814;
+    color: #e8e4dc;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.55;
+    overflow: hidden;
+  }
+  .event-stream.collapsed {
+    background: var(--muted-bg);
+    color: var(--text);
+  }
+  .stream-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 8px 14px;
+    border-bottom: 1px solid #2d2a25;
+    background: #0f0e0c;
+  }
+  .stream-title {
+    font-family: var(--display);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #f0d4a8;
+    text-transform: uppercase;
+    font-size: 11px;
+  }
+  .stream-sub { color: #807a6e; font-size: 11px; flex: 1; }
+  .stream-toggle {
+    background: transparent;
+    border: 1px solid #4a4742;
+    color: #c0bcb4;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .stream-toggle:hover { border-color: var(--accent); color: var(--accent); }
+  .event-stream.collapsed .stream-toggle {
+    border: none;
+    background: var(--muted-bg);
+    color: var(--accent);
+    padding: 10px 14px;
+    width: 100%;
+    text-align: left;
+    font-size: 13px;
+  }
+  .event-stream.collapsed .stream-toggle:hover { background: rgba(212,69,47,0.06); }
+  .stream-body {
+    padding: 8px 0;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  .ev-line {
+    display: grid;
+    grid-template-columns: 60px 22px auto 1fr;
+    gap: 8px;
+    align-items: baseline;
+    padding: 3px 14px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .ev-line:hover { background: #25221d; border-left-color: var(--accent); }
+  .ev-time { color: #6b6760; font-size: 11px; }
+  .ev-icon { font-size: 13px; }
+  .ev-label { color: #f0d4a8; font-weight: 500; }
+  .ev-detail { color: #a8a298; }
+  .ev-line.pass .ev-label { color: #8ed18e; }
+  .ev-line.warn .ev-label { color: #e8b760; }
+  .ev-line.fail .ev-label, .ev-line.block .ev-label { color: #e87a5e; }
+  .ev-line.skipped { opacity: 0.55; }
+  .ev-line.skipped .ev-label { color: #8a857c; }
+  .cursor-line { padding: 3px 14px; }
+  .ev-cursor {
+    display: inline-block;
+    width: 8px;
+    height: 12px;
+    background: var(--accent);
+    animation: blink 0.7s steps(2) infinite;
+    vertical-align: text-bottom;
+  }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.2; } }
+
   /* ───── Pod kapotou ───── */
   .pod {
     background: var(--muted-bg);
@@ -635,6 +724,8 @@ function defaultState() {
     animating: false,
     typing: false,
     typed: "",
+    eventIdx: 0,
+    streamCollapsed: false,
   };
 }
 
@@ -981,6 +1072,112 @@ function composeOutput(scenarioKey, s, trace) {
 }
 
 /* ════════════════════════════════════════════════════════════
+   EVENT STREAM — derives a chronological "what's happening" log
+   from the trace. Lets viewers see the agent's reasoning step-by-step
+   instead of just the final verdict.
+   ════════════════════════════════════════════════════════════ */
+
+function buildEventStream(trace, s, scenarioKey) {
+  const ev = [];
+  const sc = SCENARIOS[scenarioKey];
+  const skill = trace[2].details;
+  const mcp = trace[3].details;
+  const evals = trace[4].details;
+
+  // Layer 1: prompt arrives
+  ev.push({ layer: "prompt", icon: "📥", label: "PROMPT received",
+            detail: '"' + (sc.prompt.length > 60 ? sc.prompt.slice(0, 60) + "…" : sc.prompt) + '"' });
+
+  // Layer 2: config loads
+  ev.push({ layer: "config", icon: "📋", label: "CONFIG loaded",
+            detail: "preamble: read-only · schema=COURSES.SCH_TEROR · output=verdict/table/evidence" });
+
+  // Layer 3: skill checks
+  if (!s.skillOn) {
+    ev.push({ layer: "skill", icon: "⏸️", label: "SKILL skipped",
+              detail: "skill is disabled in toggles — no SQL check performed", status: "skipped" });
+  } else {
+    ev.push({ layer: "skill", icon: "🛡️", label: "SKILL loaded",
+              detail: "sql-review.md — 4 rules active" });
+    if (scenarioKey === "B") {
+      if (s.rules.rejectOld) {
+        ev.push({ layer: "skill", icon: "🔍", label: "rule rejectOld checks /(_OLD|_BACKUP|_LEGACY)/i",
+                  detail: skill.firedRules?.includes("rejectOld") ? "match: TEROR2_OLD ✗" : "no match" });
+      }
+      if (s.rules.neverInvent) {
+        ev.push({ layer: "skill", icon: "🔍", label: "rule neverInvent verifies columns vs schema",
+                  detail: skill.firedRules?.includes("neverInvent") ? "YEAR ∉ TEROR2 schema · victims ∉ TEROR2 schema ✗" : "all columns exist" });
+      }
+    }
+    if (scenarioKey === "C" && s.rules.refuseDrop) {
+      ev.push({ layer: "skill", icon: "🔍", label: "rule refuseDrop matches /(DROP|DELETE|UPDATE|TRUNCATE)/i",
+                detail: skill.firedRules?.includes("refuseDrop") ? "match: DROP TABLE ✗" : "no match" });
+    }
+    if (scenarioKey === "A" && s.rules.preferCountry) {
+      ev.push({ layer: "skill", icon: "🔍", label: "rule preferCountry advises clean table",
+                detail: "→ steer agent to COUNTRY (204 rows), avoid COUNTRY_DIRTYDATA (408)" });
+    }
+    if (skill.status === "block") {
+      ev.push({ layer: "skill", icon: "🛑", label: "SKILL blocks the request",
+                detail: skill.violations.length + " violation(s) — returning early to chat", status: "block" });
+    } else if (skill.status === "pass") {
+      ev.push({ layer: "skill", icon: "✓", label: "SKILL passes — request OK to execute",
+                detail: scenarioKey === "A" && s.rules.preferCountry ? "with steering note for table choice" : "no violations", status: "pass" });
+    }
+  }
+
+  // Layer 4: MCP
+  if (mcp.status === "skipped") {
+    ev.push({ layer: "mcp", icon: "⏸️", label: "MCP skipped",
+              detail: "skill blocked the request → no execute_query call", status: "skipped" });
+  } else if (mcp.status === "fail" && (mcp.reason || "").includes("not enabled")) {
+    ev.push({ layer: "mcp", icon: "❌", label: "MCP unavailable",
+              detail: "snowflake server toggled OFF — request fails before any call", status: "fail" });
+  } else {
+    (mcp.calls || []).forEach((c, i) => {
+      let detail;
+      if (c.tool === "list_tables") detail = "→ returns 4 tables in COURSES.SCH_TEROR";
+      else if (c.tool === "describe_table") detail = "→ schema for " + (c.args.table_name || "?");
+      else if (c.tool === "execute_query") detail = (c.args.sql || "").split("\n")[0].slice(0, 70) + (c.args.sql && c.args.sql.length > 70 ? "…" : "");
+      else detail = JSON.stringify(c.args);
+      ev.push({ layer: "mcp", icon: "📡", label: "MCP call · " + c.tool, detail });
+    });
+    if (mcp.status === "fail") {
+      ev.push({ layer: "mcp", icon: "💥", label: "MCP returned error",
+                detail: mcp.reason || "execute_query failed", status: "fail" });
+    } else if (mcp.destructiveExecuted) {
+      ev.push({ layer: "mcp", icon: "💥", label: "destructive query executed",
+                detail: "TEROR2_OLD has been dropped — irreversible", status: "fail" });
+    } else {
+      ev.push({ layer: "mcp", icon: "✓", label: "MCP returned " + (mcp.rows ? mcp.rows.length : "?") + " rows",
+                detail: "from table " + (mcp.countryTable || "TEROR2"), status: "pass" });
+    }
+  }
+
+  // Layer 5: evals
+  const cases = evals.cases || [];
+  if (cases.length === 0) {
+    ev.push({ layer: "evals", icon: "⚪", label: "EVAL · no cases enabled",
+              detail: "all eval toggles are OFF — nothing checks the answer", status: "skipped" });
+  } else {
+    cases.forEach(c => {
+      ev.push({ layer: "evals", icon: c.pass ? "✓" : "✗", label: "EVAL · " + c.name,
+                detail: c.detail, status: c.pass ? "pass" : "fail" });
+    });
+  }
+
+  // Final
+  const finalStatus = trace[4].status === "warn" ? "warn"
+                    : trace[3].status === "fail" ? "fail"
+                    : trace[2].status === "block" ? "fail"
+                    : "pass";
+  ev.push({ layer: "output", icon: "📤", label: "OUTPUT composed",
+            detail: "verdict=" + (finalStatus === "warn" ? "warn" : finalStatus === "fail" ? "fail" : "pass") + " · displayed in chat", status: finalStatus });
+
+  return ev;
+}
+
+/* ════════════════════════════════════════════════════════════
    RENDER
    ════════════════════════════════════════════════════════════ */
 
@@ -999,6 +1196,7 @@ function escapeHtml(s) {
 function render() {
   const root = document.getElementById("root");
   const { trace, output } = run(state.scenario, state);
+  const events = buildEventStream(trace, state, state.scenario);
 
   root.innerHTML = `
     <div class="page">
@@ -1008,6 +1206,7 @@ function render() {
         <div class="stage">
           ${renderChat(trace, output)}
           ${renderTrace(trace)}
+          ${renderEventStream(events)}
           ${renderPod(trace)}
           ${renderDownloads()}
         </div>
@@ -1016,6 +1215,47 @@ function render() {
   `;
 
   attachEvents();
+}
+
+function renderEventStream(events) {
+  const visible = state.animating ? events.slice(0, state.eventIdx)
+                                  : events;
+  const collapsed = state.streamCollapsed && !state.animating;
+
+  if (collapsed) {
+    return `
+      <div class="event-stream collapsed">
+        <button class="stream-toggle" data-stream="replay">▶ replay event stream (${events.length} steps)</button>
+      </div>
+    `;
+  }
+
+  const lines = visible.map((e, i) => {
+    const t = String((i * 0.12).toFixed(2)).padStart(5, " ");
+    const status = e.status || "";
+    return `
+      <div class="ev-line ${status}" data-layer="${e.layer}">
+        <span class="ev-time">[${t}s]</span>
+        <span class="ev-icon">${e.icon}</span>
+        <span class="ev-label">${escapeHtml(e.label)}</span>
+        <span class="ev-detail">${escapeHtml(e.detail)}</span>
+      </div>
+    `;
+  }).join("");
+
+  const cursor = state.animating ? `<div class="ev-line cursor-line"><span class="ev-time">…</span><span class="ev-cursor"></span></div>` : "";
+  const collapseBtn = !state.animating ? `<button class="stream-toggle dim" data-stream="collapse">▼ hide</button>` : "";
+
+  return `
+    <div class="event-stream">
+      <div class="stream-head">
+        <span class="stream-title">event stream</span>
+        <span class="stream-sub">co se děje pod kapotou — klikni na řádek pro detail</span>
+        ${collapseBtn}
+      </div>
+      <div class="stream-body">${lines}${cursor}</div>
+    </div>
+  `;
 }
 
 function renderHero() {
@@ -1233,8 +1473,22 @@ function attachEvents() {
   document.querySelectorAll("[data-layer]").forEach(chip => {
     chip.addEventListener("click", () => {
       const layer = chip.dataset.layer;
+      if (!LAYERS.find(L => L.key === layer)) return; // ignore "output" event lines
       state.expanded = state.expanded === layer ? null : layer;
       render();
+    });
+  });
+
+  document.querySelectorAll("[data-stream]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const action = btn.dataset.stream;
+      if (action === "collapse") {
+        state.streamCollapsed = true;
+        render();
+      } else if (action === "replay") {
+        state.streamCollapsed = false;
+        runWithAnimation();
+      }
     });
   });
 
@@ -1266,29 +1520,49 @@ function download(filename, content) {
 
 const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+let streamTimer = null;
 function runWithAnimation() {
+  if (streamTimer) { clearInterval(streamTimer); streamTimer = null; }
+  if (typeTimer) { clearInterval(typeTimer); typeTimer = null; }
+
   if (reduceMotion) {
     state.animating = false;
     state.typing = false;
+    state.streamCollapsed = false;
+    state.eventIdx = Infinity;
     render();
     return;
   }
 
+  // Build event count up front
+  const { trace } = run(state.scenario, state);
+  const totalEvents = buildEventStream(trace, state, state.scenario).length;
+
   state.animating = true;
   state.typing = false;
+  state.streamCollapsed = false;
+  state.eventIdx = 0;
   render();
 
-  setTimeout(() => {
-    state.animating = false;
-    state.typing = true;
-    state.typed = "";
-    render();
-    typeOutput();
-  }, 1500);
+  const STEP_MS = 120;
+  streamTimer = setInterval(() => {
+    state.eventIdx++;
+    if (state.eventIdx >= totalEvents) {
+      clearInterval(streamTimer);
+      streamTimer = null;
+      state.animating = false;
+      state.typing = true;
+      state.typed = "";
+      render();
+      typeOutput();
+    } else {
+      render();
+    }
+  }, STEP_MS);
 }
 
 let typeTimer = null;
-function typeOutput() {
+function typeOutput(done) {
   if (typeTimer) clearInterval(typeTimer);
   const { output } = run(state.scenario, state);
   let i = 0;
@@ -1298,6 +1572,7 @@ function typeOutput() {
       typeTimer = null;
       state.typing = false;
       render();
+      if (done) done();
       return;
     }
     state.typed = output.slice(0, i + 1);
