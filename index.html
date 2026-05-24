@@ -752,8 +752,9 @@ function runMcp(scenarioKey, s, skillResult) {
   }
 
   if (scenarioKey === "A") {
-    // Even with preferCountry warning, agent (in this sim) still happens to use DIRTYDATA — eval catches it.
-    const useClean = s.rules.preferCountry === false ? false : false; // sim: agent ignores preferCountry warning, picks DIRTYDATA
+    // Skill rule preferCountry steers the agent: ON → use clean COUNTRY table; OFF → agent
+    // grabs whichever country table it discovered first (DIRTYDATA appears earlier alphabetically).
+    const useClean = (s.skillOn && s.rules.preferCountry);
     const countryTable = useClean ? "COUNTRY" : "COUNTRY_DIRTYDATA";
     return {
       status: "pass",
@@ -864,16 +865,31 @@ function composeOutput(scenarioKey, s, trace) {
         "  - if you really need to drop, do it via Snowflake console with explicit confirmation",
       ].join("\n");
     } else if (mcp.destructiveExecuted) {
+      const why = !s.skillOn
+        ? "WARNING: skill is disabled — nothing checked the SQL"
+        : "WARNING: rule refuseDrop is OFF — destructive verb not screened";
       return [
-        "verdict: <span class='verdict-fail'>executed (skill bypassed)</span>",
+        "verdict: <span class='verdict-fail'>executed (guardrail bypassed)</span>",
         "table_used: TEROR2_OLD",
         "evidence:",
         "  - DROP TABLE TEROR2_OLD ran successfully",
-        "  - WARNING: skill rule refuseDrop is OFF — guardrail bypassed",
+        "  - " + why,
         "risks:",
         "  - data loss is permanent",
         "next_step:",
-        "  - re-enable refuseDrop rule and recover from backup",
+        "  - re-enable the missing guardrail and recover from backup",
+      ].join("\n");
+    } else if (mcp.status === "fail") {
+      return [
+        "verdict: <span class='verdict-fail'>fail</span>",
+        "table_used: none",
+        "evidence:",
+        "  - " + (mcp.reason || "MCP unavailable"),
+        "  - request never reached the database",
+        "risks:",
+        "  - none — destructive operation not executed",
+        "next_step:",
+        "  - re-enable the snowflake MCP server",
       ].join("\n");
     }
   }
@@ -893,33 +909,56 @@ function composeOutput(scenarioKey, s, trace) {
         "  FROM TEROR2 WHERE iyear >= 2018 GROUP BY region_txt, iyear",
       ].join("\n");
     } else if (mcp.status === "fail") {
+      const why = !s.skillOn
+        ? "WARNING: skill is disabled — nothing pre-screened the SQL"
+        : "WARNING: rules rejectOld and neverInvent are OFF — bad columns slipped through";
+      const noServer = (mcp.reason || "").includes("not enabled");
       return [
         "verdict: <span class='verdict-fail'>fail</span>",
-        "table_used: TEROR2_OLD",
+        "table_used: " + (noServer ? "none" : "TEROR2_OLD"),
         "evidence:",
         "  - " + (mcp.reason || "MCP failed"),
-        "  - WARNING: skill guardrails are OFF — query went straight to MCP",
+        "  - " + why,
         "risks: agent presented a plausible-looking SQL with non-existent columns",
-        "next_step: re-enable skill (rejectOld, neverInvent) and re-run",
+        "next_step: re-enable the missing guardrails and re-run",
       ].join("\n");
     }
   }
 
   if (scenarioKey === "A") {
+    if (mcp.status === "fail") {
+      return [
+        "verdict: <span class='verdict-fail'>fail</span>",
+        "table_used: none",
+        "evidence:",
+        "  - " + (mcp.reason || "MCP unavailable"),
+        "  - cannot answer without database access",
+        "risks:",
+        "  - none — request never reached the database",
+        "next_step:",
+        "  - re-enable the snowflake MCP server",
+      ].join("\n");
+    }
+
     const rows = mcp.rows || [];
     const rowsText = rows.map((r,i) => `  ${i+1}. ${r[0]} — ${r[1].toLocaleString()} attacks`).join("\n");
     const usedDirty = (mcp.countryTable === "COUNTRY_DIRTYDATA");
-    const evalFail = evals.status === "warn";
+    const evalFlagged = evals.cases.some(c => !c.pass);
 
     let verdict, evidence, risks, nextStep;
-    if (evalFail && usedDirty) {
+    if (usedDirty && evalFlagged) {
       verdict = "<span class='verdict-warn'>warn</span>";
-      evidence = "  - joined " + mcp.countryTable + " (408 rows, contains duplicates)\n  - country counts may be inflated";
-      risks = "  - eval `count ≠ 408` flagged DIRTYDATA → likely double-counts";
-      nextStep = "  - swap " + mcp.countryTable + " → COUNTRY (204 clean rows) and re-run";
+      evidence = "  - joined COUNTRY_DIRTYDATA (408 rows, contains duplicates)\n  - country counts may be inflated";
+      risks = "  - evals flagged DIRTYDATA → likely double-counts";
+      nextStep = "  - swap COUNTRY_DIRTYDATA → COUNTRY (204 clean rows) and re-run";
+    } else if (usedDirty) {
+      verdict = "<span class='verdict-pass'>pass (silently)</span>";
+      evidence = "  - joined COUNTRY_DIRTYDATA (408 rows, contains duplicates)\n  - the relevant evals are OFF — nothing flagged the leak";
+      risks = "  - dashboard would ship with inflated numbers; no evidence in the verdict";
+      nextStep = "  - re-enable count408 / noDirtyLeak evals before trusting this output";
     } else {
       verdict = "<span class='verdict-pass'>pass</span>";
-      evidence = "  - joined " + mcp.countryTable + " (204 clean rows)";
+      evidence = "  - joined COUNTRY (204 clean rows)\n  - skill rule preferCountry steered the agent to the clean table";
       risks = "  - none flagged";
       nextStep = "  - ship to dashboard";
     }
@@ -1279,16 +1318,16 @@ function assertEq(a, b, msg) {
 }
 
 // — Scenario A defaults —
-test("A: 5-layer trace, MCP uses DIRTYDATA, count408 eval fires warn", () => {
+test("A: 5-layer trace, skill steers to clean COUNTRY, evals pass", () => {
   const { trace, output } = run("A", defaultState());
   assertEq(trace.length, 5);
   assertEq(trace.map(t => t.layer).join(","), "prompt,config,skill,mcp,evals");
   assertEq(trace[2].status, "pass");
   assertEq(trace[3].status, "pass");
-  assertEq(trace[3].details.countryTable, "COUNTRY_DIRTYDATA");
-  assertEq(trace[4].status, "warn");
-  assert(output.includes("warn"));
-  assert(output.includes("COUNTRY_DIRTYDATA"));
+  assertEq(trace[3].details.countryTable, "COUNTRY");
+  assertEq(trace[4].status, "pass");
+  assert(output.includes("pass"));
+  assert(!output.includes("DIRTYDATA"));
 });
 
 test("A: rows include Iraq at top", () => {
@@ -1296,17 +1335,23 @@ test("A: rows include Iraq at top", () => {
   assertEq(trace[3].details.rows[0][0], "Iraq");
 });
 
-test("A with count408 eval off: no warn", () => {
-  const s = defaultState(); s.evals.count408 = false; s.evals.noDirtyLeak = false;
+test("A with preferCountry off: agent grabs DIRTYDATA, evals warn", () => {
+  const s = defaultState(); s.rules.preferCountry = false;
   const { trace, output } = run("A", s);
-  assertEq(trace[4].status, "pass");
-  assert(output.includes("pass"));
+  assertEq(trace[3].details.countryTable, "COUNTRY_DIRTYDATA");
+  assertEq(trace[4].status, "warn");
+  assert(output.includes("warn"));
 });
 
-test("A with noDirtyLeak eval off but count408 on: still warns", () => {
-  const s = defaultState(); s.evals.noDirtyLeak = false;
-  const { trace } = run("A", s);
-  assertEq(trace[4].status, "warn");
+test("A with preferCountry off + all evals off: silent fail (DIRTYDATA, no warn)", () => {
+  const s = defaultState();
+  s.rules.preferCountry = false;
+  s.evals.schemaMatch = false; s.evals.noDestructive = false;
+  s.evals.noDirtyLeak = false; s.evals.count408 = false;
+  const { trace, output } = run("A", s);
+  assertEq(trace[3].details.countryTable, "COUNTRY_DIRTYDATA");
+  assertEq(trace[4].status, "pass");
+  assert(output.includes("silently"));
 });
 
 // — Scenario B defaults —
@@ -1402,7 +1447,7 @@ test("snowflake MCP off does not affect Scenario C if skill blocks first", () =>
 });
 
 // — Eval combinations —
-test("A: turning off all evals → status pass even with DIRTYDATA used", () => {
+test("A: turning off all evals → eval layer reports zero cases, status pass", () => {
   const s = defaultState();
   s.evals.schemaMatch = false; s.evals.noDestructive = false;
   s.evals.noDirtyLeak = false; s.evals.count408 = false;
