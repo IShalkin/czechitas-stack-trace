@@ -2,8 +2,6 @@
 
 An interactive demo for the Czechitas data-analysis workshop. Click a scenario, watch a single SQL request flow through all five agentic layers (Prompt → Config → Skill → MCP → Evals), then download real config files to drop into your own GitHub Copilot or OpenCode project.
 
-![Screenshot](screenshot.png)
-
 **Live demo:** https://ishalkin.github.io/czechitas-stack-trace/
 
 **Sibling tool:** https://ishalkin.github.io/czechitas-skill-builder/ — coloring book for the SKILL.md file.
