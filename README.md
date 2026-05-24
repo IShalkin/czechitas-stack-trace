@@ -4,7 +4,9 @@ An interactive demo for the Czechitas data-analysis workshop. Click a scenario, 
 
 **Live demo:** https://ishalkin.github.io/czechitas-stack-trace/
 
-**Sibling tool:** https://ishalkin.github.io/czechitas-skill-builder/ — coloring book for the SKILL.md file.
+**Sibling tools:**
+- https://ishalkin.github.io/czechitas-skill-builder/ — coloring book for the SKILL.md file
+- https://ishalkin.github.io/czechitas-pixel-agent/ — the same five layers as a pixel-art office walkthrough
 
 ## What it does
 
